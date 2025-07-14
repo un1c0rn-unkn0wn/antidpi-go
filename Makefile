@@ -53,10 +53,10 @@ default:
 	CGO_ENABLED=0 GOOS=linux GOARCH=mips64le go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.linux_mips64le main.go
 	
 	# Windows amd64
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.windows_amd64 main.go
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.windows_amd64.exe main.go
 	
 	# Windows arm64
-	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.windows_arm64 main.go
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.windows_arm64.exe main.go
 
 	@echo "==============Adding License==============="
 	# Adding License

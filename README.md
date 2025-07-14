@@ -22,6 +22,11 @@ A lightweight HTTP TCP proxy designed to fragment TLS traffic and help bypass De
 
 The proxy listens for incoming HTTP `CONNECT` requests and forwards them to the target destination. If the port matches the list of fragmentation ports (e.g., 443), it intercepts and fragments the initial TLS handshake, making detection by DPI systems more difficult.
 
+## Install
+
+You can download the latest release for your architecture and operating system from [the releases
+page](https://github.com/un1c0rn-unkn0wn/antidpi-go/releases).
+
 ## Build Instructions
 
 ### From Source
