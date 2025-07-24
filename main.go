@@ -48,8 +48,12 @@ func main() {
     }
     defer listener.Close()
 
-    log.Println("Proxy is running on", listenAddr)
+    log.Println("HTTP proxy is running on", listenAddr)
+    log.Println("---------------------------------------")
+    log.Println("Connections timeout:", ConnTimeout)
     log.Println("Max connections limit:", cap(maxConnections))
+    log.Println("Max request size:", MaxRequestSize/1024, "KB")
+    log.Println("---------------------------------------")
 
     ctx, cancel := context.WithCancel(context.Background())
     go handleSignals(cancel, listener)
@@ -69,12 +73,9 @@ func main() {
             }
         }
         
-        // Попытка получить слот для соединения
         select {
         case maxConnections <- struct{}{}:
-            // Разрешено - продолжаем
         default:
-            // Лимит превышен
             log.Println("Too many connections, rejecting new connection")
             conn.Close()
             continue
@@ -83,7 +84,6 @@ func main() {
         wg.Add(1)
         go func(c net.Conn) {
             defer wg.Done()
-            // Освобождаем слот при завершении соединения
             defer func() { <-maxConnections }()
             handleConnection(c, *outgoingAddr, fragmentPorts)
         }(conn)
