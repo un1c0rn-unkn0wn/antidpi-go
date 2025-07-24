@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"math/rand"
@@ -19,8 +18,12 @@ import (
 )
 
 const (
-    ConnTimeout = 30 * time.Second // Таймаут соединения
-    MaxRequestSize = 64 * 1024 // 64KB максимум для запроса
+    ConnTimeout = 90 * time.Second // Connection timeout
+    MaxRequestSize = 1024 * 1024 // Limit (1024KB) request size
+)
+
+var (
+    maxConnections = make(chan struct{}, 2000) // Limit number connections
 )
 
 var wg sync.WaitGroup
@@ -30,46 +33,61 @@ func init() {
 }
 
 func main() {
-	ip := flag.String("ip", "127.0.0.1", "IP address to listen on")
-	port := flag.String("port", "8881", "Port to listen on")
-	outgoingAddr := flag.String("outgoing-addr", "", "IP address for outgoing connections")
-	fragmentPortsStr := flag.String("fragment-ports", "443", "Ports to fragment traffic on, comma separated (e.g., 443,8443)")
-	flag.Parse()
+    ip := flag.String("ip", "127.0.0.1", "IP address to listen on")
+    port := flag.String("port", "8881", "Port to listen on")
+    outgoingAddr := flag.String("outgoing-addr", "", "IP address for outgoing connections")
+    fragmentPortsStr := flag.String("fragment-ports", "443", "Ports to fragment traffic on, comma separated (e.g., 443,8443)")
+    flag.Parse()
 
-	fragmentPorts := parsePortList(*fragmentPortsStr)
+    fragmentPorts := parsePortList(*fragmentPortsStr)
 
-	listenAddr := net.JoinHostPort(*ip, *port)
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		log.Fatalf("Failed to start server: %v", err)
-	}
-	defer listener.Close()
+    listenAddr := net.JoinHostPort(*ip, *port)
+    listener, err := net.Listen("tcp", listenAddr)
+    if err != nil {
+        log.Fatalf("Failed to start server: %v", err)
+    }
+    defer listener.Close()
 
-	fmt.Printf("Proxy is running on %s\n", listenAddr)
+    log.Println("Proxy is running on", listenAddr)
+    log.Println("Max connections limit:", cap(maxConnections))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go handleSignals(cancel, listener)
+    ctx, cancel := context.WithCancel(context.Background())
+    go handleSignals(cancel, listener)
 
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				log.Println("Shutdown signal received. Waiting for connections to finish...")
-				wg.Wait()
-				log.Println("All connections closed. Exiting.")
-				return
-			default:
-				log.Printf("Failed to accept connection: %v", err)
-				continue
-			}
-		}
-		wg.Add(1)
-		go func(c net.Conn) {
-			defer wg.Done()
-			handleConnection(c, *outgoingAddr, fragmentPorts)
-		}(conn)
-	}
+    for {
+        conn, err := listener.Accept()
+        if err != nil {
+            select {
+            case <-ctx.Done():
+                log.Println("Shutdown signal received. Waiting for connections to finish...")
+                wg.Wait()
+                log.Println("All connections closed. Exiting.")
+                return
+            default:
+                log.Printf("Failed to accept connection: %v", err)
+                continue
+            }
+        }
+        
+        // Попытка получить слот для соединения
+        select {
+        case maxConnections <- struct{}{}:
+            // Разрешено - продолжаем
+        default:
+            // Лимит превышен
+            log.Println("Too many connections, rejecting new connection")
+            conn.Close()
+            continue
+        }
+        
+        wg.Add(1)
+        go func(c net.Conn) {
+            defer wg.Done()
+            // Освобождаем слот при завершении соединения
+            defer func() { <-maxConnections }()
+            handleConnection(c, *outgoingAddr, fragmentPorts)
+        }(conn)
+    }
 }
 
 func handleSignals(cancel context.CancelFunc, listener net.Listener) {
