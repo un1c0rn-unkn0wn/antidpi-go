@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -86,60 +88,125 @@ func parsePortList(s string) map[string]bool {
 }
 
 func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts map[string]bool) {
-	defer localConn.Close()
+    defer localConn.Close()
 
-	buf := make([]byte, 1500)
-	n, err := localConn.Read(buf)
-	if err != nil || n == 0 {
-		return
-	}
+    buf := make([]byte, 1500)
+    n, err := localConn.Read(buf)
+    if err != nil || n == 0 {
+        return
+    }
 
-	line := buf[:n]
-	firstLineEnd := findLineEnd(line)
-	if firstLineEnd == -1 {
-		return
-	}
+    line := buf[:n]
+    firstLineEnd := findLineEnd(line)
+    if firstLineEnd == -1 {
+        return
+    }
 
-	parts := splitBySpace(line[:firstLineEnd])
-	if len(parts) < 2 || string(parts[0]) != "CONNECT" {
-		return
-	}
+    parts := splitBySpace(line[:firstLineEnd])
+    if len(parts) < 2 {
+        return
+    }
 
-	hostPort := string(parts[1])
-	remoteAddr := hostPort
-	_, port, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		remoteAddr = net.JoinHostPort(remoteAddr, "443")
-		port = "443"
-	}
+    method := string(parts[0])
 
-	_, err = localConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
-	if err != nil {
-		return
-	}
+    // Обработка CONNECT (HTTPS)
+    if method == "CONNECT" {
+        hostPort := string(parts[1])
+        remoteAddr := hostPort
+        _, port, err := net.SplitHostPort(remoteAddr)
+        if err != nil {
+            remoteAddr = net.JoinHostPort(remoteAddr, "443")
+            port = "443"
+        }
 
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	if outgoingIPStr != "" {
-		localAddr := &net.TCPAddr{IP: net.ParseIP(outgoingIPStr)}
-		dialer = &net.Dialer{LocalAddr: localAddr, Timeout: 10 * time.Second}
-	}
+        _, err = localConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+        if err != nil {
+            return
+        }
 
-	remoteConn, err := dialer.Dial("tcp", remoteAddr)
-	if err != nil {
-		log.Printf("Failed to connect to %s: %v", remoteAddr, err)
-		return
-	}
-	defer remoteConn.Close()
+        dialer := &net.Dialer{Timeout: 10 * time.Second}
+        if outgoingIPStr != "" {
+            localAddr := &net.TCPAddr{IP: net.ParseIP(outgoingIPStr)}
+            dialer = &net.Dialer{LocalAddr: localAddr, Timeout: 10 * time.Second}
+        }
 
-	if fragmentPorts[port] {
-		ok := forwardWithFragmentation(localConn, remoteConn)
-		if !ok {
-			return
-		}
-	}
+        remoteConn, err := dialer.Dial("tcp", remoteAddr)
+        if err != nil {
+            log.Printf("Failed to connect to %s: %v", remoteAddr, err)
+            return
+        }
+        defer remoteConn.Close()
 
-	go io.Copy(remoteConn, localConn)
-	io.Copy(localConn, remoteConn)
+        if fragmentPorts[port] {
+            ok := forwardWithFragmentation(localConn, remoteConn)
+            if !ok {
+                return
+            }
+        }
+
+        go io.Copy(remoteConn, localConn)
+        io.Copy(localConn, remoteConn)
+        return
+    }
+
+    // Обработка обычного HTTP-запроса
+    hostPort := ""
+    
+    // Ищем Host в заголовках
+    headers := bytes.Split(buf[:n], []byte("\r\n"))
+    for _, header := range headers[1:] { // Пропускаем первую строку
+        if len(header) > 5 && bytes.Equal(bytes.ToLower(header[:5]), []byte("host:")) {
+            hostPort = string(bytes.TrimSpace(header[5:]))
+            break
+        }
+    }
+    
+    // Если Host не найден в заголовках, пробуем из URL в первой строке
+    if hostPort == "" {
+        if len(parts) >= 2 {
+            urlPart := string(parts[1])
+            if strings.HasPrefix(urlPart, "http://") {
+                u, err := url.Parse(urlPart)
+                if err == nil {
+                    hostPort = u.Host
+                }
+            }
+        }
+    }
+
+    if hostPort == "" {
+        log.Println("Host not found in HTTP request")
+        return
+    }
+
+    // Если порт не указан, добавляем 80
+    if _, _, err := net.SplitHostPort(hostPort); err != nil {
+        hostPort = net.JoinHostPort(hostPort, "80")
+    }
+
+    dialer := &net.Dialer{Timeout: 10 * time.Second}
+    if outgoingIPStr != "" {
+        localAddr := &net.TCPAddr{IP: net.ParseIP(outgoingIPStr)}
+        dialer = &net.Dialer{LocalAddr: localAddr, Timeout: 10 * time.Second}
+    }
+
+    remoteConn, err := dialer.Dial("tcp", hostPort)
+    if err != nil {
+        log.Printf("Failed to connect to %s: %v", hostPort, err)
+        return
+    }
+    defer remoteConn.Close()
+
+    // Отправляем оригинальный запрос
+    _, err = remoteConn.Write(buf[:n])
+    if err != nil {
+        log.Printf("Failed to send request to remote: %v", err)
+        return
+    }
+
+    // Проксируем трафик в обе стороны
+    go io.Copy(remoteConn, localConn)
+    io.Copy(localConn, remoteConn)
 }
 
 func forwardWithFragmentation(src net.Conn, dst net.Conn) bool {
