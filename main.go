@@ -18,6 +18,11 @@ import (
 	"time"
 )
 
+const (
+    ConnTimeout = 30 * time.Second // Таймаут соединения
+    MaxRequestSize = 64 * 1024 // 64KB максимум для запроса
+)
+
 var wg sync.WaitGroup
 
 func init() {
@@ -89,11 +94,18 @@ func parsePortList(s string) map[string]bool {
 
 func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts map[string]bool) {
     defer localConn.Close()
+    
+    localConn.SetDeadline(time.Now().Add(ConnTimeout))
 
     buf := make([]byte, 1500)
     n, err := localConn.Read(buf)
     if err != nil || n == 0 {
         return
+    }
+    
+    if n > MaxRequestSize {
+    log.Printf("Request too large: %d bytes (max: %d)", n, MaxRequestSize)
+    return
     }
 
     line := buf[:n]
@@ -109,7 +121,6 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
 
     method := string(parts[0])
 
-    // Обработка CONNECT (HTTPS)
     if method == "CONNECT" {
         hostPort := string(parts[1])
         remoteAddr := hostPort
@@ -136,6 +147,8 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
             return
         }
         defer remoteConn.Close()
+        
+        remoteConn.SetDeadline(time.Now().Add(ConnTimeout))
 
         if fragmentPorts[port] {
             ok := forwardWithFragmentation(localConn, remoteConn)
@@ -149,19 +162,16 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
         return
     }
 
-    // Обработка обычного HTTP-запроса
     hostPort := ""
     
-    // Ищем Host в заголовках
     headers := bytes.Split(buf[:n], []byte("\r\n"))
-    for _, header := range headers[1:] { // Пропускаем первую строку
+    for _, header := range headers[1:] {
         if len(header) > 5 && bytes.Equal(bytes.ToLower(header[:5]), []byte("host:")) {
             hostPort = string(bytes.TrimSpace(header[5:]))
             break
         }
     }
     
-    // Если Host не найден в заголовках, пробуем из URL в первой строке
     if hostPort == "" {
         if len(parts) >= 2 {
             urlPart := string(parts[1])
@@ -179,7 +189,6 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
         return
     }
 
-    // Если порт не указан, добавляем 80
     if _, _, err := net.SplitHostPort(hostPort); err != nil {
         hostPort = net.JoinHostPort(hostPort, "80")
     }
@@ -196,15 +205,15 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
         return
     }
     defer remoteConn.Close()
+    
+    remoteConn.SetDeadline(time.Now().Add(ConnTimeout))
 
-    // Отправляем оригинальный запрос
     _, err = remoteConn.Write(buf[:n])
     if err != nil {
         log.Printf("Failed to send request to remote: %v", err)
         return
     }
 
-    // Проксируем трафик в обе стороны
     go io.Copy(remoteConn, localConn)
     io.Copy(localConn, remoteConn)
 }
