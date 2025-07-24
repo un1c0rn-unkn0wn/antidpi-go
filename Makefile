@@ -1,4 +1,4 @@
-VERSION=v1.0
+VERSION=v1.1
 
 default:
 	@echo "=============Building binaries============="
@@ -25,13 +25,13 @@ default:
 	CGO_ENABLED=0 GOOS=freebsd GOARCH=386 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.freebsd_386 main.go
 
 	# FreeBSD amd64
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.freebsd_amd64 main.go
+	CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.freebsd_amd64 main.go
 
 	# FreeBSD arm
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.freebsd_arm main.go
+	CGO_ENABLED=0 GOOS=freebsd GOARCH=arm go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.freebsd_arm main.go
 
 	# FreeBSD arm64
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.freebsd_arm64 main.go
+	CGO_ENABLED=0 GOOS=freebsd GOARCH=arm64 go build -ldflags="-s -w -X 'main.Version=$(VERSION)'" -o build/antidpi-go.freebsd_arm64 main.go
 	
 	# !EXPEREMENTAL!
 	# Linux mips-softfloat
