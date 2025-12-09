@@ -1,46 +1,84 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"flag"
-	"io"
-	"log"
-	"math/rand"
-	"net"
-	"net/url"
-	"os"
-	"os/signal"
-	"strings"
-	"sync"
-	"syscall"
-	"time"
+    "bufio"
+    "bytes"
+    "context"
+    "flag"
+    "io"
+    "log"
+    "math/rand"
+    "net"
+    "net/url"
+    "os"
+    "os/signal"
+    "strings"
+    "sync"
+    "syscall"
+    "time"
 )
 
 const (
-    ConnTimeout = 90 * time.Second // Connection timeout
-    MaxRequestSize = 1024 * 1024 // Limit (1024KB) request size
+    ConnTimeout     = 90 * time.Second
+    MaxRequestSize  = 1024 * 1024
 )
 
 var (
-    maxConnections = make(chan struct{}, 2000) // Limit number connections
+    maxConnections = make(chan struct{}, 2000)
+    dnsHosts map[string]string
 )
 
 var wg sync.WaitGroup
 
 func init() {
-	rand.Seed(time.Now().UnixNano())
+    rand.Seed(time.Now().UnixNano())
+}
+
+func loadHostsFile(path string) map[string]string {
+    result := make(map[string]string)
+    file, err := os.Open(path)
+    if err != nil {
+        log.Printf("Failed to open dns-hosts file: %v", err)
+        return result
+    }
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        line := strings.TrimSpace(scanner.Text())
+        if line == "" || strings.HasPrefix(line, "#") {
+            continue
+        }
+        fields := strings.Fields(line)
+        if len(fields) >= 2 {
+            ip := fields[0]
+            for _, host := range fields[1:] {
+                result[strings.ToLower(host)] = ip
+            }
+        }
+    }
+    if err := scanner.Err(); err != nil {
+        log.Printf("Failed reading dns-hosts file: %v", err)
+    }
+    return result
 }
 
 func main() {
     ip := flag.String("ip", "127.0.0.1", "IP address to listen on")
     port := flag.String("port", "8881", "Port to listen on")
-    outgoingAddr := flag.String("outgoing-addr", "", "IP address for outgoing connections")
-    fragmentPortsStr := flag.String("fragment-ports", "443", "Ports to fragment traffic on, comma separated (e.g., 443,8443)")
+    outgoingAddr := flag.String("outgoing-addr", "", "IP for outgoing connections")
+    fragmentPortsStr := flag.String("fragment-ports", "443", "Ports to fragment")
+    dnsHostsPath := flag.String("dns-hosts", "", "Path to custom DNS hosts file")
     flag.Parse()
 
-    fragmentPorts := parsePortList(*fragmentPortsStr)
+    if *dnsHostsPath != "" {
+        dnsHosts = loadHostsFile(*dnsHostsPath)
+        log.Printf("Loaded %d host overrides from %s", len(dnsHosts), *dnsHostsPath)
+    } else {
+        dnsHosts = make(map[string]string)
+    }
 
+    fragmentPorts := parsePortList(*fragmentPortsStr)
     listenAddr := net.JoinHostPort(*ip, *port)
     listener, err := net.Listen("tcp", listenAddr)
     if err != nil {
@@ -51,7 +89,7 @@ func main() {
     log.Println("HTTP proxy is running on", listenAddr)
     log.Println("---------------------------------------")
     log.Println("Connections timeout:", ConnTimeout)
-    log.Println("Max connections limit:", cap(maxConnections))
+    log.Println("Max connections:", cap(maxConnections))
     log.Println("Max request size:", MaxRequestSize/1024, "KB")
     log.Println("---------------------------------------")
 
@@ -63,24 +101,23 @@ func main() {
         if err != nil {
             select {
             case <-ctx.Done():
-                log.Println("Shutdown signal received. Waiting for connections to finish...")
+                log.Println("Shutdown signal received. Waiting...")
                 wg.Wait()
-                log.Println("All connections closed. Exiting.")
                 return
             default:
                 log.Printf("Failed to accept connection: %v", err)
                 continue
             }
         }
-        
+
         select {
         case maxConnections <- struct{}{}:
         default:
-            log.Println("Too many connections, rejecting new connection")
+            log.Println("Too many connections, rejecting")
             conn.Close()
             continue
         }
-        
+
         wg.Add(1)
         go func(c net.Conn) {
             defer wg.Done()
@@ -90,29 +127,21 @@ func main() {
     }
 }
 
-func handleSignals(cancel context.CancelFunc, listener net.Listener) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigChan
-	log.Printf("Received termination signal: %s", sig)
-	cancel()
-	listener.Close()
-}
-
-func parsePortList(s string) map[string]bool {
-	result := make(map[string]bool)
-	for _, part := range strings.Split(s, ",") {
-		p := strings.TrimSpace(part)
-		if p != "" {
-			result[p] = true
-		}
-	}
-	return result
+func resolveWithHosts(original string) string {
+    host, port, err := net.SplitHostPort(original)
+    if err != nil {
+        host = original
+        port = "80"
+    }
+    low := strings.ToLower(host)
+    if ip, ok := dnsHosts[low]; ok {
+        return net.JoinHostPort(ip, port)
+    }
+    return original
 }
 
 func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts map[string]bool) {
     defer localConn.Close()
-    
     localConn.SetDeadline(time.Now().Add(ConnTimeout))
 
     buf := make([]byte, 1500)
@@ -120,10 +149,10 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
     if err != nil || n == 0 {
         return
     }
-    
+
     if n > MaxRequestSize {
-    log.Printf("Request too large: %d bytes (max: %d)", n, MaxRequestSize)
-    return
+        log.Printf("Request too large: %d bytes", n)
+        return
     }
 
     line := buf[:n]
@@ -139,12 +168,14 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
 
     method := string(parts[0])
 
+    // CONNECT logic
     if method == "CONNECT" {
         hostPort := string(parts[1])
-        remoteAddr := hostPort
-        _, port, err := net.SplitHostPort(remoteAddr)
+        hostPort = resolveWithHosts(hostPort)
+
+        _, port, err := net.SplitHostPort(hostPort)
         if err != nil {
-            remoteAddr = net.JoinHostPort(remoteAddr, "443")
+            hostPort = net.JoinHostPort(hostPort, "443")
             port = "443"
         }
 
@@ -155,22 +186,19 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
 
         dialer := &net.Dialer{Timeout: 10 * time.Second}
         if outgoingIPStr != "" {
-            localAddr := &net.TCPAddr{IP: net.ParseIP(outgoingIPStr)}
-            dialer = &net.Dialer{LocalAddr: localAddr, Timeout: 10 * time.Second}
+            dialer = &net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(outgoingIPStr)}, Timeout: 10 * time.Second}
         }
 
-        remoteConn, err := dialer.Dial("tcp", remoteAddr)
+        remoteConn, err := dialer.Dial("tcp", hostPort)
         if err != nil {
-            log.Printf("Failed to connect to %s: %v", remoteAddr, err)
+            log.Printf("Failed to connect to %s: %v", hostPort, err)
             return
         }
         defer remoteConn.Close()
-        
         remoteConn.SetDeadline(time.Now().Add(ConnTimeout))
 
         if fragmentPorts[port] {
-            ok := forwardWithFragmentation(localConn, remoteConn)
-            if !ok {
+            if !forwardWithFragmentation(localConn, remoteConn) {
                 return
             }
         }
@@ -180,8 +208,8 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
         return
     }
 
+    // HTTP request
     hostPort := ""
-    
     headers := bytes.Split(buf[:n], []byte("\r\n"))
     for _, header := range headers[1:] {
         if len(header) > 5 && bytes.Equal(bytes.ToLower(header[:5]), []byte("host:")) {
@@ -189,21 +217,19 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
             break
         }
     }
-    
-    if hostPort == "" {
-        if len(parts) >= 2 {
-            urlPart := string(parts[1])
-            if strings.HasPrefix(urlPart, "http://") {
-                u, err := url.Parse(urlPart)
-                if err == nil {
-                    hostPort = u.Host
-                }
+
+    if hostPort == "" && len(parts) >= 2 {
+        urlPart := string(parts[1])
+        if strings.HasPrefix(urlPart, "http://") {
+            u, err := url.Parse(urlPart)
+            if err == nil {
+                hostPort = u.Host
             }
         }
     }
 
     if hostPort == "" {
-        log.Println("Host not found in HTTP request")
+        log.Println("Host not found in request")
         return
     }
 
@@ -211,10 +237,11 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
         hostPort = net.JoinHostPort(hostPort, "80")
     }
 
+    hostPort = resolveWithHosts(hostPort)
+
     dialer := &net.Dialer{Timeout: 10 * time.Second}
     if outgoingIPStr != "" {
-        localAddr := &net.TCPAddr{IP: net.ParseIP(outgoingIPStr)}
-        dialer = &net.Dialer{LocalAddr: localAddr, Timeout: 10 * time.Second}
+        dialer = &net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(outgoingIPStr)}, Timeout: 10 * time.Second}
     }
 
     remoteConn, err := dialer.Dial("tcp", hostPort)
@@ -223,12 +250,11 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
         return
     }
     defer remoteConn.Close()
-    
     remoteConn.SetDeadline(time.Now().Add(ConnTimeout))
 
     _, err = remoteConn.Write(buf[:n])
     if err != nil {
-        log.Printf("Failed to send request to remote: %v", err)
+        log.Printf("Failed to send request: %v", err)
         return
     }
 
@@ -237,64 +263,75 @@ func handleConnection(localConn net.Conn, outgoingIPStr string, fragmentPorts ma
 }
 
 func forwardWithFragmentation(src net.Conn, dst net.Conn) bool {
-	head := make([]byte, 5)
-	_, err := io.ReadFull(src, head)
-	if err != nil {
-		return false
-	}
+    head := make([]byte, 5)
+    _, err := io.ReadFull(src, head)
+    if err != nil { return false }
 
-	data := make([]byte, 2048)
-	n, err := src.Read(data)
-	if err != nil && err != io.EOF {
-		return false
-	}
-	data = data[:n]
+    data := make([]byte, 2048)
+    n, err := src.Read(data)
+    if err != nil && err != io.EOF { return false }
+    data = data[:n]
 
-	payload := append([]byte{}, data...)
+    payload := append([]byte{}, data...)
 
-	for len(payload) > 0 {
-		partLen := randInt(1, len(payload))
-		part := payload[:partLen]
-		payload = payload[partLen:]
+    for len(payload) > 0 {
+        partLen := randInt(1, len(payload))
+        part := payload[:partLen]
+        payload = payload[partLen:]
 
-		header := []byte{0x16, 0x03, 0x04}
-		length := []byte{byte(len(part) >> 8), byte(len(part) & 0xff)}
-		fragment := append(append(header, length...), part...)
+        header := []byte{0x16, 0x03, 0x04}
+        length := []byte{byte(len(part) >> 8), byte(len(part) & 0xff)}
+        fragment := append(append(header, length...), part...)
 
-		_, err := dst.Write(fragment)
-		if err != nil {
-			return false
-		}
-	}
+        _, err := dst.Write(fragment)
+        if err != nil { return false }
+    }
 
-	return true
+    return true
 }
 
 func randInt(min int, max int) int {
-	if max <= min {
-		return min
-	}
-	return rand.Intn(max-min+1) + min
+    if max <= min { return min }
+    return rand.Intn(max-min+1) + min
 }
 
 func findLineEnd(data []byte) int {
-	for i := 0; i < len(data)-1; i++ {
-		if data[i] == '\r' && data[i+1] == '\n' {
-			return i
-		}
-	}
-	return -1
+    for i := 0; i < len(data)-1; i++ {
+        if data[i] == '\r' && data[i+1] == '\n' {
+            return i
+        }
+    }
+    return -1
 }
 
 func splitBySpace(line []byte) [][]byte {
-	var res [][]byte
-	start := 0
-	for i, b := range line {
-		if b == ' ' {
-			res = append(res, line[start:i])
-			start = i + 1
-		}
-	}
-	res = append(res, line[start:])
-	return res
+    var res [][]byte
+    start := 0
+    for i, b := range line {
+        if b == ' ' {
+            res = append(res, line[start:i])
+            start = i + 1
+        }
+    }
+    res = append(res, line[start:])
+    return res
 }
+
+func parsePortList(s string) map[string]bool {
+    result := make(map[string]bool)
+    for _, part := range strings.Split(s, ",") {
+        p := strings.TrimSpace(part)
+        if p != "" { result[p] = true }
+    }
+    return result
+}
+
+func handleSignals(cancel context.CancelFunc, listener net.Listener) {
+    sigChan := make(chan os.Signal, 1)
+    signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+    sig := <-sigChan
+    log.Printf("Received termination signal: %s", sig)
+    cancel()
+    listener.Close()
+}
+

@@ -6,7 +6,7 @@ A lightweight HTTP TCP proxy designed to fragment TLS traffic and help bypass De
 🔧 Built in **Go**, this proxy supports selective TLS fragmentation and outgoing IP binding. It can be used to bypass censorship and test services for compliance with various standards.
 
  ⚠️**WARNING!** 
- All code is written using ChatGPT and DeepSeek.
+ All code is written using ChatGPT, DeepSeek and Qwen.
  
 **Note:** This project is intended for educational and research purposes only.
 
@@ -17,6 +17,7 @@ A lightweight HTTP TCP proxy designed to fragment TLS traffic and help bypass De
 - ✅ Configurable outgoing (bind) IP
 - ✅ Lightweight and dependency-free
 - ✅ Randomized TLS fragment sizes
+- ✅ Custom DNS resolving for some domains (additional hosts file)
 
 ## How it works
 
@@ -46,7 +47,7 @@ make zip	# Archiving binaries for different architectures into ZIP archive
 ## Usage
 
 ```bash
-./antidpi-go -ip IP_FOR_LISTENING -port PORT_FOR_LISTENING -outgoing-addr YOUR_INTERFACE_IP -fragment-ports="443,8443"
+./antidpi-go -ip IP_FOR_LISTENING -port PORT_FOR_LISTENING -outgoing-addr YOUR_INTERFACE_IP -fragment-ports="443,8443" -dns-hosts PATH_TO_FILE
 ```
 
 ### Flags
@@ -57,6 +58,18 @@ make zip	# Archiving binaries for different architectures into ZIP archive
 | `-port`            | TCP port to listen on                                  | `8881`          |
 | `-outgoing-addr`   | Local IP to bind for outgoing connections              | `-`
 | `-fragment-ports`  | Comma-separated list of destination ports to fragment  | `443`
+| `-dns-hosts`       | Path to additional hosts file                          | `-`
+
+### Additional DNS Hosts
+
+You can use text hosts-like file to spoof DNS resolution results for your own purposes. For example, block malicious domains or accessing ChatGPT from regions where it is unavailable.
+
+You can find lists of right IP addresses in Internet or compile your own using various network utilities. 
+
+```text
+#This is comment
+8.8.4.4 dns.google
+```
 
 ### Example
 
